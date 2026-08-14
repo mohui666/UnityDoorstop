@@ -95,6 +95,11 @@ int dup2_hook(int od, int nd) {
 __attribute__((constructor)) void doorstop_ctor() {
     init_logger();
     load_config();
+    if (config.ignore_disabled_env) {
+        unsetenv("DOORSTOP_INITIALIZED");
+        unsetenv("DOORSTOP_DISABLE");
+        LOG("Cleared inherited DOORSTOP_INITIALIZED / DOORSTOP_DISABLE");
+    }
 
     if (!config.enabled) {
         LOG("Doorstop not enabled! Skipping!");
