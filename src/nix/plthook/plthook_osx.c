@@ -6,7 +6,7 @@
  *
  * ------------------------------------------------------
  *
- * Copyright 2014-2019 Kubo Takehiro <kubo@jiubao.org>
+ * Copyright 2014-2024 Kubo Takehiro <kubo@jiubao.org>
  *
  * Redistribution and use in source and binary forms, with or without modification, are
  * permitted provided that the following conditions are met:
@@ -40,7 +40,6 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <dlfcn.h>
-#include <errno.h>
 #include <mach-o/dyld.h>
 #include <sys/mman.h>
 #include <mach-o/fixup-chains.h>
@@ -613,354 +612,58 @@ static void set_bind_addr(data_t *data, unsigned int *idx, const char *sym_name,
 
 static int read_chained_fixups(data_t *d, const struct mach_header *mh, const char *image_name)
 {
-    const uint8_t *ptr = (const uint8_t *)mh + d->chained_fixups->dataoff;
-    const uint8_t *end = ptr + d->chained_fixups->datasize;
-    const struct dyld_chained_fixups_header *header = (const struct dyld_chained_fixups_header *)ptr;
-    const struct dyld_chained_import *import = (const struct dyld_chained_import *)(ptr + header->imports_offset);
-    const struct dyld_chained_import_addend *import_addend = (const struct dyld_chained_import_addend *)(ptr + header->imports_offset);
-    const struct dyld_chained_import_addend64 *import_addend64 = (const struct dyld_chained_import_addend64 *)(ptr + header->imports_offset);
-    const char *symbol_pool = (const char*)ptr + header->symbols_offset;
-    int rv = PLTHOOK_INTERNAL_ERROR;
-    size_t size;
-    uint32_t i;
-#ifdef PLTHOOK_DEBUG_FIXUPS
-    const struct dyld_chained_starts_in_image *starts = (const struct dyld_chained_starts_in_image *)(ptr + header->starts_offset);
-    FILE *fp = NULL;
-#endif
-    if (d->got_addr == 0) {
-        set_errmsg("__got section is not found in %s", image_name);
-        rv = PLTHOOK_INVALID_FILE_FORMAT;
-        goto cleanup;
+    (void)mh;
+    const struct segment_command_64 *linkedit =
+        d->segments[d->linkedit_segment_idx];
+    const uint64_t fixups_fileoff = d->chained_fixups->dataoff;
+    const uint64_t fixups_size = d->chained_fixups->datasize;
+
+    /*
+     * linkedit_data_command offsets are relative to the Mach-O slice, while
+     * __LINKEDIT is mapped at vmaddr + slide. Validate the complete range
+     * before translating the file offset to a live address. This translation
+     * is independent of the outer FAT file's slice offset.
+     */
+    if (fixups_fileoff < linkedit->fileoff ||
+        fixups_fileoff - linkedit->fileoff > linkedit->filesize ||
+        fixups_size >
+            linkedit->filesize - (fixups_fileoff - linkedit->fileoff)) {
+        set_errmsg("chained-fixups data is outside __LINKEDIT in %s",
+                   image_name);
+        return PLTHOOK_INVALID_FILE_FORMAT;
+    }
+    if (fixups_size < sizeof(struct dyld_chained_fixups_header)) {
+        set_errmsg("chained-fixups header is truncated in %s", image_name);
+        return PLTHOOK_INVALID_FILE_FORMAT;
+    }
+
+    const uint8_t *ptr = (const uint8_t *)(
+        linkedit->vmaddr - linkedit->fileoff + d->slide + fixups_fileoff);
+    const struct dyld_chained_fixups_header *header =
+        (const struct dyld_chained_fixups_header *)ptr;
+    if (header->fixups_version != 0) {
+        set_errmsg("unknown chained fixups version %u in %s",
+                   header->fixups_version, image_name);
+        return PLTHOOK_INVALID_FILE_FORMAT;
     }
 
     DEBUG_FIXUPS("dyld_chained_fixups_header\n"
                  "  fixups_version  %u\n"
-                 "  starts_offset   %u\n"
-                 "  imports_offset  %u\n"
-                 "  symbols_offset  %u\n"
-                 "  imports_count   %u\n"
-                 "  imports_format  %u\n"
-                 "  symbols_format  %u\n",
-                 header->fixups_version,
-                 header->starts_offset,
-                 header->imports_offset,
-                 header->symbols_offset,
-                 header->imports_count,
-                 header->imports_format,
-                 header->symbols_format);
-    if (header->fixups_version != 0) {
-        set_errmsg("unknown chained fixups version %u", header->fixups_version);
-        rv = PLTHOOK_INVALID_FILE_FORMAT;
-        goto cleanup;
-    }
+                 "  imports_count   %u\n",
+                 header->fixups_version, header->imports_count);
 
-    size = offsetof(plthook_t, entries) + sizeof(bind_address_t) * header->imports_count;
-    d->plthook = (plthook_t*)calloc(1, size);
-    if (d->plthook == NULL) {
-        set_errmsg("failed to allocate memory: %" PRIuPTR " bytes", size);
-        rv = PLTHOOK_OUT_OF_MEMORY;
-        goto cleanup;
-    }
-    d->plthook->num_entries = header->imports_count;
-    d->plthook->readonly_segment = 1;
+    /*
+     * Import-table order is not GOT-slot order. The removed implementation
+     * paired import[i] with __got[i], and its on-disk chain walk did not add a
+     * universal/FAT slice base. Either strategy can patch or read unrelated
+     * data. Doorstop uses guarded DYLD_INTERPOSE hooks for dlsym and the
+     * UnityPlayer stdio calls on macOS, so reject chained PLT enumeration until
+     * a slice-aware, real-chain iterator is available.
+     */
+    set_errmsg("chained-fixup PLT enumeration is unsupported for %s",
+               image_name);
+    return PLTHOOK_INTERNAL_ERROR;
 
-    switch (header->imports_format) {
-    case DYLD_CHAINED_IMPORT:
-        DEBUG_FIXUPS("dyld_chained_import\n");
-        break;
-    case DYLD_CHAINED_IMPORT_ADDEND:
-        DEBUG_FIXUPS("dyld_chained_import_addend\n");
-        break;
-    case DYLD_CHAINED_IMPORT_ADDEND64:
-        DEBUG_FIXUPS("dyld_chained_import_addend64\n");
-        break;
-    default:
-        set_errmsg("unknown imports format %u", header->imports_format);
-        rv = PLTHOOK_INVALID_FILE_FORMAT;
-        goto cleanup;
-    }
-
-    for (i = 0; i < header->imports_count; i++) {
-        struct dyld_chained_import_addend64 imp;
-        switch (header->imports_format) {
-        case DYLD_CHAINED_IMPORT:
-            imp.lib_ordinal = import[i].lib_ordinal;
-            imp.weak_import = import[i].weak_import;
-            imp.name_offset = import[i].name_offset;
-            imp.addend = 0;
-            break;
-        case DYLD_CHAINED_IMPORT_ADDEND:
-            imp.lib_ordinal = import_addend[i].lib_ordinal;
-            imp.weak_import = import_addend[i].weak_import;
-            imp.name_offset = import_addend[i].name_offset;
-            imp.addend = import_addend[i].addend;
-            break;
-        case DYLD_CHAINED_IMPORT_ADDEND64:
-            imp = import_addend64[i];
-            break;
-        }
-        const char *name = symbol_pool + imp.name_offset;
-        if (name > (const char*)end) {
-            DEBUG_FIXUPS("  lib_ordinal %u, weak_import %u, name_offset %u, addend %llu\n",
-                         imp.lib_ordinal, imp.weak_import, imp.name_offset, imp.addend);
-            set_errmsg("invalid symbol name address");
-            rv = PLTHOOK_INVALID_FILE_FORMAT;
-            goto cleanup;
-        }
-        DEBUG_FIXUPS("  lib_ordinal %u, weak_import %u, name_offset %u (%s), addend %llu\n",
-                     imp.lib_ordinal, imp.weak_import, imp.name_offset, name, imp.addend);
-        d->plthook->entries[i].name = name;
-        d->plthook->entries[i].addr = (void**)(d->got_addr + i * sizeof(void*));
-    }
-
-#ifdef PLTHOOK_DEBUG_FIXUPS
-    fp = fopen(image_name, "r");
-    if (fp == NULL) {
-        set_errmsg("failed to open file %s (error: %s)", image_name, strerror(errno));
-        rv = PLTHOOK_FILE_NOT_FOUND;
-        goto cleanup;
-    }
-
-    DEBUG_FIXUPS("dyld_chained_starts_in_image\n"
-                 "  seg_count       %u\n",
-                 starts->seg_count);
-    for (i = 0; i < starts->seg_count; i++) {
-        DEBUG_FIXUPS("  seg_info_offset[%u] %u\n",
-                     i, starts->seg_info_offset[i]);
-        if (starts->seg_info_offset[i] == 0) {
-            continue;
-        }
-        const struct dyld_chained_starts_in_segment* seg = (const struct dyld_chained_starts_in_segment*)((char*)starts + starts->seg_info_offset[i]);
-        uint16_t j;
-        DEBUG_FIXUPS("    dyld_chained_starts_in_segment\n"
-                     "      size              %u\n"
-                     "      page_size         0x%x\n"
-                     "      pointer_format    %u\n"
-                     "      segment_offset    %llu (0x%llx)\n"
-                     "      max_valid_pointer %u\n"
-                     "      page_count        %u\n",
-                     seg->size, seg->page_size, seg->pointer_format, seg->segment_offset, seg->segment_offset, seg->max_valid_pointer, seg->page_count);
-        for (j = 0; j < seg->page_count; j++) {
-            uint16_t index = j;
-            uint16_t break_loop = 1;
-            off_t offset;
-
-            if (seg->page_start[j] == DYLD_CHAINED_PTR_START_NONE) {
-                DEBUG_FIXUPS("      page_start[%u]     DYLD_CHAINED_PTR_START_NONE\n", j);
-                continue;
-            }
-            if (seg->page_start[j] & DYLD_CHAINED_PTR_START_MULTI) {
-                index = seg->page_start[j] & ~DYLD_CHAINED_PTR_START_MULTI;
-                DEBUG_FIXUPS("      page_start[%u]     (DYLD_CHAINED_PTR_START_MULTI | %u)\n", j, index);
-                break_loop = 0;
-            }
-            while (1) {
-                if (index != j) {
-                    DEBUG_FIXUPS("      page_start[%u]     %u\n", index, seg->page_start[index]);
-                }
-                offset = seg->segment_offset + j * seg->page_size + (seg->page_start[index] & ~DYLD_CHAINED_PTR_START_MULTI);
-                switch (seg->pointer_format) {
-                case DYLD_CHAINED_PTR_64_OFFSET: {
-                    union {
-                        struct dyld_chained_ptr_64_rebase rebase;
-                        struct dyld_chained_ptr_64_bind bind;
-                    } buf;
-
-                    do {
-                        if (fseeko(fp, offset, SEEK_SET) != 0) {
-                            set_errmsg("failed to seek to %lld in %s", offset, image_name);
-                            rv = PLTHOOK_INVALID_FILE_FORMAT;
-                            goto cleanup;
-                        }
-                        if (fread(&buf, sizeof(buf), 1, fp) != 1) {
-                            set_errmsg("failed to read fixup chain from %s", image_name);
-                            rv = PLTHOOK_INVALID_FILE_FORMAT;
-                            goto cleanup;
-                        }
-                        if (buf.rebase.bind) {
-                            DEBUG_FIXUPS("        dyld_chained_ptr_64_bind\n"
-                                         "          ordinal  %d\n"
-                                         "          addend   %d\n"
-                                         "          reserved %d\n"
-                                         "          next     %d\n"
-                                         "          bind     %d\n",
-                                         buf.bind.ordinal,
-                                         buf.bind.addend,
-                                         buf.bind.reserved,
-                                         buf.bind.next,
-                                         buf.bind.bind);
-                        } else {
-                            DEBUG_FIXUPS("        dyld_chained_ptr_64_rebase\n"
-                                         "          target   %llu\n"
-                                         "          high8    %d\n"
-                                         "          reserved %d\n"
-                                         "          next     %d\n"
-                                         "          bind     %d\n",
-                                         buf.rebase.target,
-                                         buf.rebase.high8,
-                                         buf.rebase.reserved,
-                                         buf.rebase.next,
-                                         buf.rebase.bind);
-                        }
-                        offset += buf.bind.next * 4;
-                    } while (buf.bind.next != 0);
-                    break;
-                }
-                case DYLD_CHAINED_PTR_ARM64E:
-                case DYLD_CHAINED_PTR_ARM64E_KERNEL:
-                case DYLD_CHAINED_PTR_ARM64E_USERLAND:
-                case DYLD_CHAINED_PTR_ARM64E_USERLAND24: {
-                    // The following code isn't tested.
-                    union {
-                        struct dyld_chained_ptr_arm64e_rebase rebase;
-                        struct dyld_chained_ptr_arm64e_bind bind;
-                        struct dyld_chained_ptr_arm64e_bind24 bind24;
-                        struct dyld_chained_ptr_arm64e_auth_rebase auth_rebase;
-                        struct dyld_chained_ptr_arm64e_auth_bind auth_bind;
-                        struct dyld_chained_ptr_arm64e_auth_bind24 auth_bind24;
-                    } buf;
-
-                    do {
-                        if (fseeko(fp, offset, SEEK_SET) != 0) {
-                            set_errmsg("failed to seek to %lld in %s", offset, image_name);
-                            rv = PLTHOOK_INVALID_FILE_FORMAT;
-                            goto cleanup;
-                        }
-                        if (fread(&buf, sizeof(buf), 1, fp) != 1) {
-                            set_errmsg("failed to read fixup chain from %s", image_name);
-                            rv = PLTHOOK_INVALID_FILE_FORMAT;
-                            goto cleanup;
-                        }
-                        if (!buf.rebase.auth) {
-                            if (!buf.rebase.bind) {
-                                DEBUG_FIXUPS("        dyld_chained_ptr_arm64e_rebase\n"
-                                             "          target    %llu\n"
-                                             "          high8     %d\n"
-                                             "          next      %d\n"
-                                             "          bind      %d\n"  // == 0
-                                             "          auth      %d\n", // == 0
-                                             buf.rebase.target,
-                                             buf.rebase.high8,
-                                             buf.rebase.next,
-                                             buf.rebase.bind,
-                                             buf.rebase.auth);
-                            } else if (seg->pointer_format != DYLD_CHAINED_PTR_ARM64E_USERLAND24) {
-                                DEBUG_FIXUPS("        dyld_chained_ptr_arm64e_bind\n"
-                                             "          ordinal   %d\n"
-                                             "          zero      %d\n"
-                                             "          addend    %d\n"
-                                             "          next      %d\n"
-                                             "          bind      %d\n"  // == 1
-                                             "          auth      %d\n", // == 0
-                                             buf.bind.ordinal,
-                                             buf.bind.zero,
-                                             buf.bind.addend,
-                                             buf.bind.next,
-                                             buf.bind.bind,
-                                             buf.bind.auth);
-                            } else {
-                                DEBUG_FIXUPS("        dyld_chained_ptr_arm64e_bind24\n"
-                                             "          ordinal   %d\n"
-                                             "          zero      %d\n"
-                                             "          addend    %d\n"
-                                             "          next      %d\n"
-                                             "          bind      %d\n"  // == 1
-                                             "          auth      %d\n", // == 0
-                                             buf.bind24.ordinal,
-                                             buf.bind24.zero,
-                                             buf.bind24.addend,
-                                             buf.bind24.next,
-                                             buf.bind24.bind,
-                                             buf.bind24.auth);
-                            }
-                        } else {
-                            if (!buf.rebase.bind) {
-                                DEBUG_FIXUPS("        dyld_chained_ptr_arm64e_auth_rebase\n"
-                                             "          target    %u\n"
-                                             "          diversity %d\n"
-                                             "          addrDiv   %d\n"
-                                             "          key       %d\n"
-                                             "          next      %d\n"
-                                             "          bind      %d\n"  // == 0
-                                             "          auth      %d\n", // == 1
-                                             buf.auth_rebase.target,
-                                             buf.auth_rebase.diversity,
-                                             buf.auth_rebase.addrDiv,
-                                             buf.auth_rebase.key,
-                                             buf.auth_rebase.next,
-                                             buf.auth_rebase.bind,
-                                             buf.auth_rebase.auth);
-                            } else if (seg->pointer_format != DYLD_CHAINED_PTR_ARM64E_USERLAND24) {
-                                DEBUG_FIXUPS("        dyld_chained_ptr_arm64e_auth_bind\n"
-                                             "          ordinal   %d\n"
-                                             "          zero      %d\n"
-                                             "          diversity %d\n"
-                                             "          addrDiv   %d\n"
-                                             "          key       %d\n"
-                                             "          next      %d\n"
-                                             "          bind      %d\n"  // == 1
-                                             "          auth      %d\n", // == 1
-                                             buf.auth_bind.ordinal,
-                                             buf.auth_bind.zero,
-                                             buf.auth_bind.diversity,
-                                             buf.auth_bind.addrDiv,
-                                             buf.auth_bind.key,
-                                             buf.auth_bind.next,
-                                             buf.auth_bind.bind,
-                                             buf.auth_bind.auth);
-                            } else {
-                                DEBUG_FIXUPS("        dyld_chained_ptr_arm64e_auth_bind24\n"
-                                             "          ordinal   %d\n"
-                                             "          zero      %d\n"
-                                             "          diversity %d\n"
-                                             "          addrDiv   %d\n"
-                                             "          key       %d\n"
-                                             "          next      %d\n"
-                                             "          bind      %d\n"  // == 1
-                                             "          auth      %d\n", // == 1
-                                             buf.auth_bind24.ordinal,
-                                             buf.auth_bind24.zero,
-                                             buf.auth_bind24.diversity,
-                                             buf.auth_bind24.addrDiv,
-                                             buf.auth_bind24.key,
-                                             buf.auth_bind24.next,
-                                             buf.auth_bind24.bind,
-                                             buf.auth_bind24.auth);
-                            }
-                        }
-                        if (seg->pointer_format == DYLD_CHAINED_PTR_ARM64E_KERNEL) {
-                            offset += buf.rebase.next * 4;
-                        } else {
-                            offset += buf.rebase.next * 8;
-                        }
-                    } while (buf.rebase.next != 0);
-                    break;
-                }
-                default:
-                    DEBUG_FIXUPS("unsupported pointer_format: %u\n", seg->pointer_format);
-                    break_loop = 1;
-                    break;
-                }
-                if (break_loop) {
-                    break;
-                }
-                break_loop = seg->page_start[++index] & DYLD_CHAINED_PTR_START_MULTI;
-            } // while (1) */
-        }
-    }
-#endif
-    rv = 0;
-cleanup:
-#ifdef PLTHOOK_DEBUG_FIXUPS
-    if (fp != NULL) {
-        fclose(fp);
-    }
-#endif
-    if (rv != 0 && d->plthook) {
-        free(d->plthook);
-        d->plthook = NULL;
-    }
-    return rv;
 }
 
 int plthook_enum(plthook_t *plthook, unsigned int *pos, const char **name_out, void ***addr_out)

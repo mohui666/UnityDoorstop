@@ -21,10 +21,15 @@ static inline void load_proxy(char_t *module_name) {
     char_t *alt_full_path = get_full_path(alt_name);
     free(alt_name);
 
-    LOG("Looking for original DLL from %s", alt_full_path);
+    void *handle = NULL;
+    if (alt_full_path) {
+        LOG("Looking for original DLL from %s", alt_full_path);
 
-    void *handle = dlopen(alt_full_path, RTLD_LAZY);
-    free(alt_full_path);
+        handle = dlopen(alt_full_path, RTLD_LAZY);
+        free(alt_full_path);
+    } else {
+        LOG("Failed to resolve alternate DLL path");
+    }
 
     if (handle == NULL) {
         UINT sys_len = GetSystemDirectory(NULL, 0);

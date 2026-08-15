@@ -4,6 +4,9 @@
 #if _WIN32
 #include "windows/wincrt.h"
 // Better default to account for longer name support
+#ifdef MAX_PATH
+#undef MAX_PATH
+#endif
 #define MAX_PATH 1024
 
 #if _WIN64

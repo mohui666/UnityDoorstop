@@ -10,15 +10,57 @@
 
 bool_t mono_debug_init_called = FALSE;
 bool_t mono_is_net35 = FALSE;
+static bool_t doorstop_bootstrapped = FALSE;
+
+#define LOCALHOST_DEBUG_PREFIX TEXT("localhost:")
+#define IPV4_LOOPBACK_DEBUG_PREFIX TEXT("127.0.0.1:")
+
+static bool_t debug_address_uses_localhost(const char_t *address) {
+    if (!address)
+        return FALSE;
+
+    for (size_t i = 0; i < STR_LEN(LOCALHOST_DEBUG_PREFIX) - 1; i++) {
+        char_t actual = address[i];
+        if (!actual)
+            return FALSE;
+        if (actual >= 'A' && actual <= 'Z')
+            actual += 'a' - 'A';
+        if (actual != LOCALHOST_DEBUG_PREFIX[i])
+            return FALSE;
+    }
+    return TRUE;
+}
 
 void mono_doorstop_bootstrap(void *mono_domain) {
-    if (getenv(TEXT("DOORSTOP_INITIALIZED"))) {
-        LOG("DOORSTOP_INITIALIZED is set! Skipping!");
+    if (doorstop_bootstrapped) {
+        LOG("Doorstop already bootstrapped in this process, skipping!");
         return;
     }
-    setenv(TEXT("DOORSTOP_INITIALIZED"), TEXT("TRUE"), TRUE);
+
+    // Launchers such as Steam can copy this process marker into a newly
+    // started game. The ignore switch already opts out of the equivalent
+    // DOORSTOP_DISABLE check, so honor it here as well and use a process-local
+    // flag to guard genuine re-entry.
+    char_t *initialized_env = getenv(TEXT("DOORSTOP_INITIALIZED"));
+    if (initialized_env && !config.ignore_disabled_env) {
+        LOG("DOORSTOP_INITIALIZED is set! Skipping!");
+        shutenv(initialized_env);
+        return;
+    }
+    shutenv(initialized_env);
+    doorstop_bootstrapped = TRUE;
+
+    // Debugging does not require a managed bootstrap assembly. In debug-only
+    // mode init_mono has already configured the debugger, so leave the runtime
+    // alone instead of passing a null path to the file and environment APIs.
+    if (!config.target_assembly || !file_exists(config.target_assembly)) {
+        LOG("No target assembly configured; managed bootstrap skipped");
+        return;
+    }
 
     mono.thread_set_main(mono.thread_current());
+
+    setenv(TEXT("DOORSTOP_INITIALIZED"), TEXT("TRUE"), TRUE);
 
     char_t *app_path = program_path();
     if (mono.domain_set_config) {
@@ -57,7 +99,7 @@ void mono_doorstop_bootstrap(void *mono_domain) {
     free(norm_assembly_dir);
 
     LOG("Opening assembly: %s", config.target_assembly);
-    void *file = fopen(config.target_assembly, "r");
+    void *file = fopen(config.target_assembly, TEXT("r"));
     if (!file) {
         LOG("Failed to open assembly: %s", config.target_assembly);
         return;
@@ -65,8 +107,14 @@ void mono_doorstop_bootstrap(void *mono_domain) {
 
     size_t size = get_file_size(file);
     void *data = malloc(size);
-    fread(data, size, 1, file);
+    size_t bytes_read = fread(data, 1, size, file);
     fclose(file);
+    if (bytes_read != size) {
+        LOG("Failed to read complete assembly: %s (%d of %d bytes)",
+            config.target_assembly, (int)bytes_read, (int)size);
+        free(data);
+        return;
+    }
 
     LOG("Opened Assembly DLL (%d bytes); opening its main image", size);
 
@@ -84,7 +132,7 @@ void mono_doorstop_bootstrap(void *mono_domain) {
     LOG("Image opened; loading included assembly");
 
     s = MONO_IMAGE_OK;
-    void *assembly = mono.assembly_load_from_full(image, dll_path, &s, FALSE);
+    mono.assembly_load_from_full(image, dll_path, &s, FALSE);
     free(dll_path);
     if (s != MONO_IMAGE_OK) {
         LOG("Failed to load assembly: %s. Got result: %d\n",
@@ -171,6 +219,13 @@ void *init_mono(const char *root_domain_name, const char *runtime_version) {
 
                 char_t *full_path = get_full_path(path);
 
+                if (!full_path) {
+                    LOG("Ignoring invalid root path: %s", path);
+                    free(path);
+                    path_start = i + 1;
+                    continue;
+                }
+
                 if (strlen(override_dir_full) + strlen(full_path) + 2 >
                     MAX_PATH) {
                     LOG("Ignoring this root path because its absolute version "
@@ -242,6 +297,11 @@ void il2cpp_doorstop_bootstrap() {
         return;
     }
 
+    if (!config.target_assembly || !file_exists(config.target_assembly)) {
+        LOG("No target assembly configured; CoreCLR bootstrap skipped");
+        return;
+    }
+
     LOG("CoreCLR runtime path: %s", config.clr_runtime_coreclr_path);
     LOG("CoreCLR corlib dir: %s", config.clr_corlib_dir);
 
@@ -264,7 +324,6 @@ void il2cpp_doorstop_bootstrap() {
     char *app_path_n = narrow(app_path);
 
     char_t *target_dir = get_folder_name(config.target_assembly);
-    char *target_dir_n = narrow(target_dir);
     char_t *target_name = get_file_name(config.target_assembly, FALSE);
     char *target_name_n = narrow(target_name);
 
@@ -327,8 +386,11 @@ int init_il2cpp(const char *domain_name) {
 
 void hook_mono_jit_parse_options(int argc, char **argv) {
     char_t *debug_options = getenv(TEXT("DNSPY_UNITY_DBG2"));
+    bool_t debug_options_from_env = debug_options != NULL;
     if (debug_options) {
         config.mono_debug_enabled = TRUE;
+        LOG("Mono debugging enabled by DNSPY_UNITY_DBG2; overriding Doorstop "
+            "debug options");
     }
 
     if (config.mono_debug_enabled) {
@@ -336,22 +398,45 @@ void hook_mono_jit_parse_options(int argc, char **argv) {
 
         int size = argc + 1;
         char **new_argv = calloc(size, sizeof(char *));
-        memcpy(new_argv, argv, argc * sizeof(char *));
-
-        size_t debug_args_len =
-            STR_LEN(MONO_DEBUG_ARG_START) + strlen(config.mono_debug_address);
-        if (!config.mono_debug_suspend) {
-            if (mono_is_net35) {
-                debug_args_len += STR_LEN(MONO_DEBUG_NO_SUSPEND_NET35);
-            } else {
-                debug_args_len += STR_LEN(MONO_DEBUG_NO_SUSPEND);
-            }
-        }
+        if (argc > 0 && argv)
+            memcpy(new_argv, argv, argc * sizeof(char *));
 
         if (!debug_options) {
+            const char_t *debug_address = config.mono_debug_address;
+            if (!debug_address || !debug_address[0]) {
+                debug_address = TEXT("127.0.0.1:10000");
+                LOG("Mono debug address is empty; using %s", debug_address);
+            }
+
+            const char_t *debug_address_suffix = NULL;
+            size_t debug_address_len = strlen(debug_address);
+            if (debug_address_uses_localhost(debug_address)) {
+                debug_address_suffix =
+                    debug_address + STR_LEN(LOCALHOST_DEBUG_PREFIX) - 1;
+                debug_address_len =
+                    STR_LEN(IPV4_LOOPBACK_DEBUG_PREFIX) - 1 +
+                    strlen(debug_address_suffix);
+                LOG("Normalizing Mono debug host localhost to 127.0.0.1");
+            }
+
+            size_t debug_args_len =
+                STR_LEN(MONO_DEBUG_ARG_START) + debug_address_len;
+            if (!config.mono_debug_suspend) {
+                if (mono_is_net35) {
+                    debug_args_len += STR_LEN(MONO_DEBUG_NO_SUSPEND_NET35);
+                } else {
+                    debug_args_len += STR_LEN(MONO_DEBUG_NO_SUSPEND);
+                }
+            }
+
             debug_options = calloc(debug_args_len + 1, sizeof(char_t));
             strcat(debug_options, MONO_DEBUG_ARG_START);
-            strcat(debug_options, config.mono_debug_address);
+            if (debug_address_suffix) {
+                strcat(debug_options, IPV4_LOOPBACK_DEBUG_PREFIX);
+                strcat(debug_options, debug_address_suffix);
+            } else {
+                strcat(debug_options, debug_address);
+            }
             if (!config.mono_debug_suspend) {
                 if (mono_is_net35) {
                     strcat(debug_options, MONO_DEBUG_NO_SUSPEND_NET35);
@@ -367,7 +452,10 @@ void hook_mono_jit_parse_options(int argc, char **argv) {
         new_argv[argc] = debug_options_n;
         mono.jit_parse_options(size, new_argv);
 
-        free(debug_options);
+        if (debug_options_from_env)
+            shutenv(debug_options);
+        else
+            free(debug_options);
         free(debug_options_n);
         free(new_argv);
     } else {
@@ -396,15 +484,23 @@ void *hook_mono_image_open_from_data_with_name(void *data,
         strcat(new_full_path, name_file);
 
         if (file_exists(new_full_path)) {
-            void *file = fopen(new_full_path, "r");
-            size_t size = get_file_size(file);
-            void *buf = malloc(size);
-            fread(buf, 1, size, file);
-            fclose(file);
-            result = mono.image_open_from_data_with_name(buf, size, need_copy,
-                                                         status, refonly, name);
-            if (need_copy)
-                free(buf);
+            void *file = fopen(new_full_path, TEXT("r"));
+            if (file) {
+                size_t size = get_file_size(file);
+                void *buf = malloc(size);
+                size_t bytes_read = fread(buf, 1, size, file);
+                fclose(file);
+                if (bytes_read == size) {
+                    result = mono.image_open_from_data_with_name(
+                        buf, size, need_copy, status, refonly, name);
+                } else {
+                    LOG("Failed to read complete override assembly: %s (%d "
+                        "of %d bytes)",
+                        new_full_path, (int)bytes_read, (int)size);
+                }
+                if (need_copy || bytes_read != size)
+                    free(buf);
+            }
         }
         free(new_full_path);
     }

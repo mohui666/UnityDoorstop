@@ -6,6 +6,7 @@
 #include "util/util.h"
 
 void *init_mono(const char *root_domain_name, const char *runtime_version);
+void mono_doorstop_bootstrap(void *mono_domain);
 int init_il2cpp(const char *domain_name);
 void *hook_mono_image_open_from_data_with_name(void *data,
                                                unsigned long data_len,

@@ -23,10 +23,11 @@ typedef struct {
     bool_t redirect_output_log;
 
     /**
-     * @brief Whether to ignore DOORSTOP_DISABLE.
+     * @brief Whether to ignore inherited Doorstop process markers.
      *
-     * If enabled, Doorstop will ignore DOORSTOP_DISABLE environment variable.
-     * This is sometimes useful with Steam games that break env var isolation.
+     * If enabled, Doorstop clears inherited DOORSTOP_DISABLE and
+     * DOORSTOP_INITIALIZED environment variables. This is sometimes useful
+     * with Steam games and self-restarting games that break env var isolation.
      */
     bool_t ignore_disabled_env;
 

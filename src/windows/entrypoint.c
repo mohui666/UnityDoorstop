@@ -139,11 +139,14 @@ void capture_mono_path(void *handle) {
 }
 
 bool_t initialized = FALSE;
-void *WINAPI get_proc_address_detour(void *module, char *name) {
+typedef FARPROC(WINAPI *get_proc_address_fn)(HMODULE module, LPCSTR name);
+static get_proc_address_fn previous_get_proc_address = GetProcAddress;
+
+FARPROC WINAPI get_proc_address_detour(HMODULE module, LPCSTR name) {
     // If the lpProcName pointer contains an ordinal rather than a string,
     // high-word value of the pointer is zero (see PR #66)
 #define REDIRECT_INIT(init_name, init_func, target, extra_init)                \
-    if (HIWORD(name) && lstrcmpA(name, init_name) == 0) {                      \
+    if (!IS_INTRESOURCE(name) && lstrcmpA(name, init_name) == 0) {             \
         if (!initialized) {                                                    \
             initialized = TRUE;                                                \
             LOG("Got %S at %p", init_name, module);                            \
@@ -151,7 +154,7 @@ void *WINAPI get_proc_address_detour(void *module, char *name) {
             init_func(module);                                                 \
             LOG("Loaded all runtime functions\n")                              \
         }                                                                      \
-        return (void *)(target);                                               \
+        return (FARPROC)(target);                                              \
     }
 
     REDIRECT_INIT("il2cpp_init", load_il2cpp_funcs, init_il2cpp, {});
@@ -165,7 +168,9 @@ void *WINAPI get_proc_address_detour(void *module, char *name) {
     REDIRECT_INIT("mono_debug_init", load_mono_funcs, hook_mono_debug_init,
                   capture_mono_path(module));
 
-    return (void *)GetProcAddress(module, name);
+    // Preserve hooks installed before Doorstop. Calling the kernel32 export
+    // directly here would bypass RenderDoc/apitrace's previous IAT detour.
+    return previous_get_proc_address(module, name);
 #undef REDIRECT_INIT
 }
 
@@ -213,9 +218,21 @@ void inject(DoorstopPaths const *paths) {
     LOG("Installing IAT hooks");
     bool_t ok = TRUE;
 
-#define HOOK_SYS(mod, from, to) ok &= iat_hook(mod, "kernel32.dll", &from, &to)
+#define HOOK_SYS(mod, from, to)                                                \
+    ok &= iat_hook(mod, "kernel32.dll", #from, (void *)&from, (void *)&to,    \
+                   NULL)
 
-    HOOK_SYS(target_module, GetProcAddress, get_proc_address_detour);
+    void *previous_get_proc = NULL;
+    bool_t get_proc_hooked =
+        iat_hook(target_module, "kernel32.dll", "GetProcAddress",
+                 (void *)&GetProcAddress, (void *)&get_proc_address_detour,
+                 &previous_get_proc);
+    ok &= get_proc_hooked;
+    if (get_proc_hooked && previous_get_proc &&
+        previous_get_proc != (void *)&get_proc_address_detour) {
+        previous_get_proc_address = (get_proc_address_fn)previous_get_proc;
+    }
+
     HOOK_SYS(target_module, CloseHandle, close_handle_hook);
     if (config.boot_config_override) {
         if (file_exists(config.boot_config_override)) {
@@ -284,12 +301,17 @@ BOOL WINAPI DllEntry(HINSTANCE hInstDll, DWORD reasonForDllLoad,
 
     load_config();
     LOG("Config loaded");
+    if (config.ignore_disabled_env) {
+        SetEnvironmentVariableW(L"DOORSTOP_INITIALIZED", NULL);
+        SetEnvironmentVariableW(L"DOORSTOP_DISABLE", NULL);
+        LOG("Cleared inherited DOORSTOP_INITIALIZED / DOORSTOP_DISABLE");
+    }
 
     redirect_output_log(paths);
 
-    if (!file_exists(config.target_assembly)) {
+    if (!config.target_assembly || !file_exists(config.target_assembly)) {
         LOG("Could not find target assembly!");
-        config.enabled = FALSE;
+        LOG("Continuing without a managed entrypoint");
     }
 
     inject(paths);

@@ -27,7 +27,8 @@ target_assembly="Doorstop.dll"
 # Overrides the default boot.config file path
 boot_config_override=
 
-# If enabled, DOORSTOP_DISABLE env var value is ignored
+# If enabled, inherited DOORSTOP_DISABLE and DOORSTOP_INITIALIZED markers are
+# ignored so launchers can safely start a replacement game process
 # USE THIS ONLY WHEN ASKED TO OR YOU KNOW WHAT THIS MEANS
 ignore_disable_switch="0"
 
@@ -62,9 +63,20 @@ corlib_dir=""
 # Everything past this point is the actual script
 set -e
 
+# Use POSIX-compatible way to get the directory of the script. Relative game
+# paths are resolved from here, not from the caller's working directory.
+a="/$0"; a=${a%/*}; a=${a#/}; a=${a:-.}; BASEDIR=$(cd "$a" || exit; pwd -P)
+
+script_path() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s\n' "${BASEDIR}/$1" ;;
+    esac
+}
+
 # Special case: program is launched via Steam on Linux
 # In that case rerun the script via their bootstrapper to delay adding Doorstop to LD_PRELOAD
-# This is required until https://github.com/NeighTools/UnityDoorstop/issues/88 is resolved
+# and avoid injecting Doorstop into the bootstrapper and overlay helpers.
 for a in "$@"; do
     if [ "$a" = "SteamLaunch" ]; then
         rotated=0; max=$#
@@ -90,18 +102,20 @@ for a in "$@"; do
 done
 
 # Handle first param being executable name
-if [ -x "$1" ] ; then
-    executable_name="$1"
-    shift
+if [ -n "$1" ]; then
+    first_arg_path="$(script_path "$1")"
+    if [ -x "$first_arg_path" ] ; then
+        executable_name="$1"
+        shift
+    fi
 fi
 
-if [ -z "${executable_name}" ] || [ ! -x "${executable_name}" ]; then
+executable_path_from_base="$(script_path "$executable_name")"
+if [ -z "${executable_name}" ] || [ ! -x "${executable_path_from_base}" ]; then
     echo "Please set executable_name to a valid name in a text editor or as the first command line parameter" 1>&2
     exit 1
 fi
-
-# Use POSIX-compatible way to get the directory of the executable
-a="/$0"; a=${a%/*}; a=${a#/}; a=${a:-.}; BASEDIR=$(cd "$a" || exit; pwd -P)
+executable_name="${executable_path_from_base}"
 
 arch=""
 executable_path=""
@@ -113,6 +127,38 @@ abs_path() {
         set -- "${BASEDIR}/${1}"
     fi
     echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+}
+
+normalize_search_paths() {
+    remaining_paths="$1"
+    normalized_paths=""
+
+    while :; do
+        case "$remaining_paths" in
+            *:*)
+                search_path=${remaining_paths%%:*}
+                remaining_paths=${remaining_paths#*:}
+                has_more_paths=1
+            ;;
+            *)
+                search_path=$remaining_paths
+                has_more_paths=0
+            ;;
+        esac
+
+        if [ -n "$search_path" ]; then
+            search_path="$(abs_path "$search_path")"
+            if [ -n "$normalized_paths" ]; then
+                normalized_paths="${normalized_paths}:${search_path}"
+            else
+                normalized_paths=$search_path
+            fi
+        fi
+
+        [ "$has_more_paths" -eq 1 ] || break
+    done
+
+    printf '%s\n' "$normalized_paths"
 }
 
 # Set executable path and the extension to use for the libdoorstop shared object as well as check whether we're running on Apple Silicon
@@ -288,7 +334,10 @@ while [ $i -lt $max ]; do
     i=$((i+1))
 done
 
-target_assembly="$(abs_path "$target_assembly")"
+if [ -n "$target_assembly" ]; then
+    target_assembly="$(abs_path "$target_assembly")"
+fi
+dll_search_path_override="$(normalize_search_paths "$dll_search_path_override")"
 
 # Move variables to environment
 export DOORSTOP_ENABLED="$enabled"
@@ -326,8 +375,12 @@ if [ -n "${is_apple_silicon}" ]; then
     # We need to use arch for Apple Silicon to allow the executable to be run natively as otherwise if
     # the executable is universal, supporting both x86_64 and arm64, MacOs will still run it as x86_64
     # if the parent process is running as x86.
-    # arch also strips the DYLD_INSERT_LIBRARIES env var so we have to pass that in manually
-    exec arch -e DYLD_INSERT_LIBRARIES="${DYLD_INSERT_LIBRARIES}" "$executable_path" "$@"
+    # Keep the inserted library out of the arm64e arch helper itself, then add
+    # it back only for the game process. This must use the shell builtin unset;
+    # an external env helper would encounter the same architecture mismatch.
+    doorstop_insert="${DYLD_INSERT_LIBRARIES}"
+    unset DYLD_INSERT_LIBRARIES
+    exec arch -e DYLD_INSERT_LIBRARIES="${doorstop_insert}" "$executable_path" "$@"
 else
     exec "$executable_path" "$@"
 fi

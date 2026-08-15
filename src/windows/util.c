@@ -50,19 +50,35 @@ size_t get_module_path(void *module, char_t **result, size_t *size,
 }
 
 char_t *get_full_path(char_t *path) {
+    if (!path || !path[0])
+        return NULL;
+
     const DWORD needed = GetFullPathName(path, 0, NULL, NULL);
+    if (needed == 0)
+        return NULL;
+
     char_t *res = malloc(sizeof(char_t) * needed);
-    GetFullPathName(path, needed, res, NULL);
+    const DWORD written = GetFullPathName(path, needed, res, NULL);
+    if (written == 0 || written >= needed) {
+        free(res);
+        return NULL;
+    }
     return res;
 }
 
 bool_t file_exists(char_t *file) {
+    if (!file || !file[0])
+        return FALSE;
+
     DWORD ab = GetFileAttributes(file);
     return ab != INVALID_FILE_ATTRIBUTES &&
            (ab & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
 bool_t folder_exists(char_t *folder) {
+    if (!folder || !folder[0])
+        return FALSE;
+
     DWORD ab = GetFileAttributes(folder);
     return ab != INVALID_FILE_ATTRIBUTES &&
            (ab & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -78,36 +94,60 @@ typedef struct {
     size_t ext;
     size_t parent;
     size_t len;
+    bool_t has_parent;
 } PathParts;
 
 PathParts split_path(char_t *path) {
+    if (!path || !path[0])
+        return (PathParts){0};
+
     size_t len = strlen(path);
     size_t ext = len;
-    size_t i;
-    for (i = len - 1; i > 0; i--) {
-        char_t c = path[i];
+    size_t parent = 0;
+    bool_t has_parent = FALSE;
+    for (size_t i = len; i > 0; i--) {
+        const size_t pos = i - 1;
+        char_t c = path[pos];
         if (c == TEXT('.') && ext == len)
-            ext = i;
-        else if (c == TEXT('\\') || c == TEXT('/'))
+            ext = pos;
+        else if (c == TEXT('\\') || c == TEXT('/')) {
+            parent = pos;
+            has_parent = TRUE;
             break;
+        }
     }
-    return (PathParts){.ext = ext, .parent = i, .len = len};
+    return (PathParts){.ext = ext,
+                       .parent = parent,
+                       .len = len,
+                       .has_parent = has_parent};
 }
 
 char_t *get_folder_name(char_t *path) {
+    if (!path || !path[0])
+        return NULL;
+
     PathParts parts = split_path(path);
-    char_t *result = malloc((parts.parent + 1) * sizeof(char_t));
-    strncpy(result, path, parts.parent);
-    result[parts.parent] = TEXT('\0');
+    const size_t result_len = parts.has_parent ? parts.parent : 0;
+    char_t *result = malloc((result_len + 1) * sizeof(char_t));
+    strncpy(result, path, result_len);
+    result[result_len] = TEXT('\0');
     return result;
 }
 
 char_t *get_file_name(char_t *path, bool_t with_ext) {
+    if (!path || !path[0])
+        return NULL;
+
     PathParts parts = split_path(path);
-    size_t result_len = (with_ext ? parts.len : parts.ext) - parts.parent;
-    char_t *result = malloc(result_len * sizeof(char_t));
-    strncpy(result, path + parts.parent + 1, result_len - 1);
-    result[result_len - 1] = TEXT('\0');
+    const size_t start = parts.has_parent ? parts.parent + 1 : 0;
+    size_t end = with_ext ? parts.len : parts.ext;
+    if (end < start)
+        end = parts.len;
+
+    const size_t result_len = end - start;
+    char_t *result = malloc((result_len + 1) * sizeof(char_t));
+    strncpy(result, path + start, result_len);
+    result[result_len] = TEXT('\0');
     return result;
 }
 
