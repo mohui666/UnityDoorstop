@@ -20,9 +20,11 @@ cc -Wall -Wextra -Werror -dynamiclib \
     "${TEST_DIR}/fixtures/macos-unityplayer-interpose.c" \
     -o "${SMOKE_TMP}/UnityPlayer.dylib"
 
+# Link against the dylib by path: -l would require a lib-prefixed name, but
+# the caller check expects the image basename to start with "UnityPlayer".
 cc -Wall -Wextra -Werror -Wl,-export_dynamic \
     "${TEST_DIR}/fixtures/macos-dlsym-smoke.c" \
-    -L"${SMOKE_TMP}" -lUnityPlayer -Wl,-rpath,@loader_path \
+    "${SMOKE_TMP}/UnityPlayer.dylib" -Wl,-rpath,@loader_path \
     -o "${SMOKE_TMP}/macos-dlsym-smoke"
 
 unset DOORSTOP_DISABLE DOORSTOP_INITIALIZED DOORSTOP_TARGET_ASSEMBLY
