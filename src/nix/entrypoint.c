@@ -59,6 +59,11 @@ void *dlsym_hook(void *handle, const char *name) {
             initialized = TRUE;                                                \
             init_func(handle);                                                 \
             extra_init;                                                        \
+            /* init_func probes many optional symbols, which clobbers the      \
+               caller-visible dlerror state; drain it when the caller's own    \
+               lookup succeeded. */                                            \
+            if (res)                                                           \
+                dlerror();                                                     \
         }                                                                      \
         return (void *)target;                                                 \
     }
