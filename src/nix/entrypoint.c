@@ -7,7 +7,16 @@
 #include "./plthook/plthook.h"
 
 #if defined(__APPLE__)
-#include <mach-o/dyld-interposing.h>
+// <mach-o/dyld-interposing.h> ships with the dyld source tree, not the Xcode
+// SDK, so define its stable DYLD_INTERPOSE macro locally.
+#define DYLD_INTERPOSE(_replacement, _replacee)                                \
+    __attribute__((used)) static struct {                                      \
+        const void *replacement;                                               \
+        const void *replacee;                                                  \
+    } _interpose_##_replacee                                                   \
+        __attribute__((section("__DATA,__interpose"))) = {                     \
+            (const void *)(unsigned long)&_replacement,                        \
+            (const void *)(unsigned long)&_replacee};
 #define PLTHOOK_OPEN_BY_HANDLE_OR_ADDRESS plthook_open_by_handle
 #else
 #define PLTHOOK_OPEN_BY_HANDLE_OR_ADDRESS plthook_open_by_address
