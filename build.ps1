@@ -9,7 +9,7 @@ param (
     $ScriptArgs
 )
 
-$VERSION = "2.6.1"
+$VERSION = "2.8.9"
 
 function writeErrorTip($msg) {
     Write-Host $msg -BackgroundColor Red -ForegroundColor White

@@ -19,9 +19,11 @@ typedef struct {
     IMAGE_THUNK_DATA *first_thunks;
 } SyntheticImage;
 
-static void WINAPI original_function(void) {}
-static void WINAPI previous_detour(void) {}
-static void WINAPI doorstop_detour(void) {}
+// Keep these functions observably different so optimized MSVC builds do not
+// merge their addresses through identical COMDAT folding.
+static DWORD WINAPI original_function(void) { return 1; }
+static DWORD WINAPI previous_detour(void) { return 2; }
+static DWORD WINAPI doorstop_detour(void) { return 3; }
 
 #define DETOUR_PROCESS_ID ((DWORD)0xD00570F)
 static DWORD WINAPI get_process_id_detour(void) { return DETOUR_PROCESS_ID; }

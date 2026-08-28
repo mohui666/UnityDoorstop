@@ -141,6 +141,7 @@ All Doorstop arguments start with `--doorstop-` and always contain an argument. 
 | `--doorstop-mono-debug-address string`            | The address to use for the Mono debugger server.                                                     |
 | `--doorstop-clr-corlib-dir string`                | Path to coreclr library that contains the CoreCLR runtime                                            |
 | `--doorstop-clr-runtime-coreclr-path string`      | Path to the directory containing the managed core libraries for CoreCLR (`mscorlib`, `System`, etc.) |
+| `--doorstop-macos-architectures string`           | *Only in macOS `run.sh`*: Comma-separated architectures supported by the game and modding framework |
 
 ## Troubleshooting and compatibility
 
@@ -160,12 +161,18 @@ Install only one of these proxy DLL names at a time.
 running through Wine or Proton must use the Windows Doorstop build and a
 Windows proxy DLL instead.
 
-Relative executable and `target_assembly` paths in `run.sh` are resolved from
-the script directory, so the script can be launched from another working
-directory. Each relative entry in the `dll_search_path_override` list is
-resolved from that directory as well. The target assembly's parent directory
-is not added to Mono's search path automatically. Separate multiple paths with
-`;` on Windows and `:` on Unix.
+Relative `target_assembly` paths and each relative entry in
+`dll_search_path_override` are resolved from the `run.sh` directory. The target
+assembly's parent directory is not added to Mono's search path automatically.
+Separate multiple paths with `;` on Windows and `:` on Unix.
+
+On Apple Silicon, `macos_architectures` in `run.sh` must list the architectures
+supported by both the game and the modding framework. The default
+`arm64,x86_64` prefers native execution and falls back to Rosetta; set it to
+`x86_64` when any framework component lacks arm64 support. The equivalent CLI
+option is `--doorstop-macos-architectures`. The launcher keeps both
+`DYLD_LIBRARY_PATH` and `DYLD_INSERT_LIBRARIES` out of the `/usr/bin/arch`
+helper, then restores them only for the game process.
 
 ### Debug-only mode
 

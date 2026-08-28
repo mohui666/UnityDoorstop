@@ -16,7 +16,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path ./artifacts/verbose/x64
           New-Item -ItemType Directory -Force -Path ./artifacts/verbose/x86
       - name: Run Windows regression tests
-        run: ./tests/windows/run-regressions.ps1
+        run: ./build.ps1 -Arch x64 test
       - name: Build Release
         run: |
           ./build.ps1
@@ -76,7 +76,7 @@ jobs:
           cp assets/nix/run.sh artifacts/release/x64/run.sh
           cp LICENSE artifacts/release/LICENSE
       - name: Run nix regression tests
-        run: sh tests/nix/run-regressions.sh build/linux/x64/release/libdoorstop.so
+        run: ./build.sh -arch=x64 test
       - name: Build Verbose
         run: |
           ./build.sh -with_logging
@@ -133,7 +133,7 @@ jobs:
           cp assets/nix/run.sh artifacts/release/universal/run.sh
           cp LICENSE artifacts/release/LICENSE
       - name: Run macOS interposition smoke test
-        run: sh tests/nix/run-macos-interpose-smoke.sh build/macosx/universal/release/libdoorstop.dylib
+        run: ./build.sh test
       - name: Build Verbose
         run: |
           ./build.sh -with_logging

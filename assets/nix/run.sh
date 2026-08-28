@@ -12,6 +12,11 @@
 # MACOS: name of the .app directory
 executable_name=""
 
+# MACOS: comma-separated architectures supported by both the game and the
+# modding framework. Use "x86_64" when any framework component lacks arm64
+# support; keep the default to prefer native arm64 with an x86_64 fallback.
+macos_architectures="arm64,x86_64"
+
 # All of the below can be overriden with command line args
 
 # General Config Options
@@ -63,59 +68,19 @@ corlib_dir=""
 # Everything past this point is the actual script
 set -e
 
-# Use POSIX-compatible way to get the directory of the script. Relative game
-# paths are resolved from here, not from the caller's working directory.
-a="/$0"; a=${a%/*}; a=${a#/}; a=${a:-.}; BASEDIR=$(cd "$a" || exit; pwd -P)
-
-script_path() {
-    case "$1" in
-        /*) printf '%s\n' "$1" ;;
-        *) printf '%s\n' "${BASEDIR}/$1" ;;
-    esac
-}
-
-# Special case: program is launched via Steam on Linux
-# In that case rerun the script via their bootstrapper to delay adding Doorstop to LD_PRELOAD
-# and avoid injecting Doorstop into the bootstrapper and overlay helpers.
-for a in "$@"; do
-    if [ "$a" = "SteamLaunch" ]; then
-        rotated=0; max=$#
-        while [ $rotated -lt $max ]; do
-            # Test if argument is prefixed with the value of $PWD
-            if [ "$1" != "${1#"${PWD%/}/"}" ]; then
-                to_rotate=$(($# - rotated))
-                set -- "$@" "$0"
-                while [ $((to_rotate-=1)) -ge 0 ]; do
-                    set -- "$@" "$1"
-                    shift
-                done
-                exec "$@"
-            else
-                set -- "$@" "$1"
-                shift
-                rotated=$((rotated+1))
-            fi
-        done
-        echo "Could not determine game executable launched by Steam" 1>&2
-        exit 1
-    fi
-done
-
 # Handle first param being executable name
-if [ -n "$1" ]; then
-    first_arg_path="$(script_path "$1")"
-    if [ -x "$first_arg_path" ] ; then
-        executable_name="$1"
-        shift
-    fi
+if [ -x "$1" ] ; then
+    executable_name="$1"
+    shift
 fi
 
-executable_path_from_base="$(script_path "$executable_name")"
-if [ -z "${executable_name}" ] || [ ! -x "${executable_path_from_base}" ]; then
+if [ -z "${executable_name}" ] || [ ! -x "${executable_name}" ]; then
     echo "Please set executable_name to a valid name in a text editor or as the first command line parameter" 1>&2
     exit 1
 fi
-executable_name="${executable_path_from_base}"
+
+# Use POSIX-compatible way to get the directory of the executable
+a="/$0"; a=${a%/*}; a=${a#/}; a=${a:-.}; BASEDIR=$(cd "$a" || exit; pwd -P)
 
 arch=""
 executable_path=""
@@ -326,6 +291,11 @@ while [ $i -lt $max ]; do
             shift
             i=$((i+1))
         ;;
+        --doorstop-macos-architectures)
+            macos_architectures="$2"
+            shift
+            i=$((i+1))
+        ;;
         *)
             set -- "$@" "$1"
         ;;
@@ -370,17 +340,26 @@ else
 fi
 
 if [ -n "${is_apple_silicon}" ]; then
-    export ARCHPREFERENCE="arm64,x86_64"
+    if [ -z "${macos_architectures}" ]; then
+        echo "macos_architectures must list at least one supported architecture" 1>&2
+        exit 1
+    fi
+    export ARCHPREFERENCE="${macos_architectures}"
 
     # We need to use arch for Apple Silicon to allow the executable to be run natively as otherwise if
     # the executable is universal, supporting both x86_64 and arm64, MacOs will still run it as x86_64
     # if the parent process is running as x86.
-    # Keep the inserted library out of the arm64e arch helper itself, then add
-    # it back only for the game process. This must use the shell builtin unset;
-    # an external env helper would encounter the same architecture mismatch.
-    doorstop_insert="${DYLD_INSERT_LIBRARIES}"
-    unset DYLD_INSERT_LIBRARIES
-    exec arch -e DYLD_INSERT_LIBRARIES="${doorstop_insert}" "$executable_path" "$@"
+    # Keep injected libraries and their search paths out of the arm64e arch
+    # helper itself, then add them back only for the game process. This must use
+    # the shell builtin unset; an external env helper would encounter the same
+    # architecture mismatch.
+    doorstop_dyld_library_path="${DYLD_LIBRARY_PATH}"
+    doorstop_dyld_insert_libraries="${DYLD_INSERT_LIBRARIES}"
+    unset DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES
+    exec arch \
+        -e DYLD_LIBRARY_PATH="${doorstop_dyld_library_path}" \
+        -e DYLD_INSERT_LIBRARIES="${doorstop_dyld_insert_libraries}" \
+        "$executable_path" "$@"
 else
     exec "$executable_path" "$@"
 fi

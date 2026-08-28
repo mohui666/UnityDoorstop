@@ -145,3 +145,5 @@ target("doorstop")
                       path.join(universal_dir, ".doorstop_version"))
             end)
     end
+
+includes("tests/xmake.lua")

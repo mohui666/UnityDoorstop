@@ -1,13 +1,15 @@
 #!/bin/sh
 set -eu
 
-if [ "$(uname -s)" != "Darwin" ] || [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-    echo "Usage on macOS: $0 /path/to/libdoorstop.dylib" 1>&2
+if [ "$(uname -s)" != "Darwin" ] || [ "$#" -ne 3 ] || \
+    [ ! -f "$1" ] || [ ! -f "$2" ] || [ ! -x "$3" ]; then
+    echo "Usage on macOS: $0 /path/to/libdoorstop.dylib /path/to/UnityPlayer.dylib /path/to/macos-dlsym-smoke" 1>&2
     exit 2
 fi
 
-a="/$0"; a=${a%/*}; a=${a#/}; a=${a:-.}; TEST_DIR=$(cd "$a" || exit; pwd -P)
 LIBDOORSTOP=$(cd "$(dirname "$1")" || exit; pwd -P)/$(basename "$1")
+UNITYPLAYER_LIB=$(cd "$(dirname "$2")" || exit; pwd -P)/$(basename "$2")
+SMOKE_BINARY=$(cd "$(dirname "$3")" || exit; pwd -P)/$(basename "$3")
 SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/unity-doorstop-interpose.XXXXXX")
 
 cleanup() {
@@ -15,23 +17,12 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-cc -Wall -Wextra -Werror -dynamiclib \
-    -Wl,-install_name,@rpath/UnityPlayer.dylib \
-    "${TEST_DIR}/fixtures/macos-unityplayer-interpose.c" \
-    -o "${SMOKE_TMP}/UnityPlayer.dylib"
-
-# Link against the dylib by path: -l would require a lib-prefixed name, but
-# the caller check expects the image basename to start with "UnityPlayer".
-cc -Wall -Wextra -Werror -Wl,-export_dynamic \
-    "${TEST_DIR}/fixtures/macos-dlsym-smoke.c" \
-    "${SMOKE_TMP}/UnityPlayer.dylib" -Wl,-rpath,@loader_path \
-    -o "${SMOKE_TMP}/macos-dlsym-smoke"
-
 unset DOORSTOP_DISABLE DOORSTOP_INITIALIZED DOORSTOP_TARGET_ASSEMBLY
 
 DOORSTOP_ENABLED=0 \
 DYLD_INSERT_LIBRARIES="${LIBDOORSTOP}" \
-    "${SMOKE_TMP}/macos-dlsym-smoke" disabled
+DYLD_LIBRARY_PATH="$(dirname "${UNITYPLAYER_LIB}"):${DYLD_LIBRARY_PATH-}" \
+    "${SMOKE_BINARY}" disabled
 
 printf '%s\n' override > "${SMOKE_TMP}/override.config"
 
@@ -41,7 +32,8 @@ enabled_output=$(
     EXPECTED_BOOT_CONFIG_PATH="$(pwd -P)/macos-dlsym-smoke_Data/boot.config" \
     REDIRECT_OUTPUT_PATH="${SMOKE_TMP}/redirected-output" \
     DYLD_INSERT_LIBRARIES="${LIBDOORSTOP}" \
-        "${SMOKE_TMP}/macos-dlsym-smoke" enabled
+    DYLD_LIBRARY_PATH="$(dirname "${UNITYPLAYER_LIB}"):${DYLD_LIBRARY_PATH-}" \
+        "${SMOKE_BINARY}" enabled
 )
 [ "${enabled_output}" = "unity-interpose-ok" ] || {
     echo "macOS UnityPlayer interposition failed: ${enabled_output}" 1>&2

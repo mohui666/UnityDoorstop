@@ -1,14 +1,16 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-    echo "Usage: $0 /path/to/libdoorstop.so" 1>&2
+if [ "$#" -ne 3 ] || [ ! -f "$1" ] || [ ! -f "$2" ] || [ ! -x "$3" ]; then
+    echo "Usage: $0 /path/to/libdoorstop.so /path/to/UnityPlayer.so /path/to/unityplayer-dup2-smoke" 1>&2
     exit 2
 fi
 
 a="/$0"; a=${a%/*}; a=${a#/}; a=${a:-.}; TEST_DIR=$(cd "$a" || exit; pwd -P)
 REPO_DIR=$(cd "${TEST_DIR}/../.." || exit; pwd -P)
 LIBDOORSTOP=$(cd "$(dirname "$1")" || exit; pwd -P)/$(basename "$1")
+UNITYPLAYER_LIB=$(cd "$(dirname "$2")" || exit; pwd -P)/$(basename "$2")
+UNITYPLAYER_SMOKE=$(cd "$(dirname "$3")" || exit; pwd -P)/$(basename "$3")
 TMP_ROOT=${TMPDIR:-/tmp}
 TEST_TMP="${TMP_ROOT%/}/unity-doorstop-tests-$$"
 
@@ -88,58 +90,51 @@ marker_output=$(
 
 # Guard the original reason for the dup2 hook as well: calls originating in a
 # real UnityPlayer module still cannot redirect stdout away from the console.
-unityplayer_case="${TEST_TMP}/unityplayer-case"
-mkdir -p "${unityplayer_case}"
-cc -Wall -Wextra -Werror -fPIC -shared \
-    -Wl,-soname,UnityPlayer.so \
-    "${TEST_DIR}/fixtures/unityplayer-dup2.c" \
-    -o "${unityplayer_case}/UnityPlayer.so"
-cc -Wall -Wextra -Werror \
-    "${TEST_DIR}/fixtures/unityplayer-dup2-smoke.c" \
-    -L"${unityplayer_case}" -Wl,-rpath,"${unityplayer_case}" \
-    -Wl,--no-as-needed -l:UnityPlayer.so \
-    -o "${unityplayer_case}/unityplayer-dup2-smoke"
-
 unityplayer_output=$(
     DOORSTOP_ENABLED=1 \
     DOORSTOP_TARGET_ASSEMBLY=/dev/null \
+    LD_LIBRARY_PATH="$(dirname "${UNITYPLAYER_LIB}"):${LD_LIBRARY_PATH-}" \
     LD_PRELOAD="${LIBDOORSTOP}" \
-    "${unityplayer_case}/unityplayer-dup2-smoke"
+    "${UNITYPLAYER_SMOKE}"
 )
 [ "${unityplayer_output}" = "visibleunityplayer-dup2-ok" ] ||
     fail "UnityPlayer stdout protection regressed: ${unityplayer_output}"
 
-# Issue #84: relative executable names are relative to run.sh even when the
-# caller is in another directory.
 linux_case="${TEST_TMP}/linux-case"
-mkdir -p "${linux_case}/caller"
+mkdir -p "${linux_case}"
 cp "${REPO_DIR}/assets/nix/run.sh" "${linux_case}/run.sh"
 cp "${LIBDOORSTOP}" "${linux_case}/libdoorstop.so"
 cp "${TEST_DIR}/fixtures/game.sh" "${linux_case}/fixture-game"
 chmod +x "${linux_case}/fixture-game"
 
-linux_output=$(cd "${linux_case}/caller" && /bin/sh ../run.sh fixture-game)
-[ "${linux_output}" = "game-ok" ] ||
-    fail "relative executable was not resolved from run.sh: ${linux_output}"
+# Issue #88: now that inherited injection no longer breaks helper processes,
+# SteamLaunch arguments must flow directly to the selected executable instead
+# of triggering the old delayed-injection re-exec workaround.
+steam_output=$(
+    cd "${linux_case}" &&
+    /bin/sh ./run.sh ./fixture-game SteamLaunch
+)
+[ "${steam_output}" = "game-ok" ] ||
+    fail "SteamLaunch still triggered delayed injection: ${steam_output}"
 
 # Debug-only mode represents the absence of a managed entrypoint with an empty
 # target value. Do not turn it into BASEDIR, which is an existing directory and
 # would be mistaken for an assembly by access(F_OK).
 empty_target_output=$(
-    cd "${linux_case}/caller" &&
-    /bin/sh ../run.sh fixture-game \
+    cd "${linux_case}" &&
+    /bin/sh ./run.sh ./fixture-game \
         --doorstop-target-assembly "" \
         --print-target-assembly
 )
 [ "${empty_target_output}" = "[]" ] ||
     fail "empty target assembly was rewritten: ${empty_target_output}"
 
-# Issue #67: each non-empty Mono search path is relative to run.sh, not the
-# caller's working directory. Multiple entries remain colon-separated.
+# Issue #67: each non-empty Mono search path is relative to run.sh.
+# Multiple entries remain colon-separated.
 mkdir -p "${linux_case}/search-one" "${linux_case}/search two"
 search_output=$(
-    cd "${linux_case}/caller" &&
-    /bin/sh ../run.sh fixture-game \
+    cd "${linux_case}" &&
+    /bin/sh ./run.sh ./fixture-game \
         --doorstop-mono-dll-search-path-override \
         "search-one::search two:" \
         --print-search-path
@@ -154,7 +149,7 @@ expected_search_path="${linux_case}/search-one:${linux_case}/search two"
 mac_case="${TEST_TMP}/mac-case"
 fake_bin="${mac_case}/fake-bin"
 game_app="${mac_case}/TestGame.app/Contents/MacOS"
-mkdir -p "${fake_bin}" "${game_app}" "${mac_case}/caller"
+mkdir -p "${fake_bin}" "${game_app}"
 cp "${REPO_DIR}/assets/nix/run.sh" "${mac_case}/run.sh"
 cp "${LIBDOORSTOP}" "${mac_case}/libdoorstop.dylib"
 cp "${TEST_DIR}/fixtures/game.sh" "${game_app}/GameBin"
@@ -167,11 +162,14 @@ chmod +x "${game_app}/GameBin" "${fake_bin}/uname" "${fake_bin}/sysctl" \
     "${fake_bin}/defaults" "${fake_bin}/file" "${fake_bin}/arch"
 
 mac_output=$(
-    cd "${mac_case}/caller" &&
+    cd "${mac_case}" &&
     PATH="${fake_bin}:${PATH}" \
+    DYLD_LIBRARY_PATH=existing/lib \
     DYLD_INSERT_LIBRARIES=existing.dylib \
+    EXPECTED_ARCHPREFERENCE=x86_64 \
+    EXPECTED_DYLD_LIBRARY_PATH="${mac_case}/:existing/lib" \
     EXPECTED_DYLD_INSERT_LIBRARIES=libdoorstop.dylib:existing.dylib \
-    /bin/sh ../run.sh TestGame.app
+    /bin/sh ./run.sh TestGame.app --doorstop-macos-architectures x86_64
 )
 [ "${mac_output}" = "arch-ok" ] ||
     fail "Apple Silicon arch environment was not isolated: ${mac_output}"
