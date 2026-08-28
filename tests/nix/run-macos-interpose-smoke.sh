@@ -10,6 +10,9 @@ fi
 LIBDOORSTOP=$(cd "$(dirname "$1")" || exit; pwd -P)/$(basename "$1")
 UNITYPLAYER_LIB=$(cd "$(dirname "$2")" || exit; pwd -P)/$(basename "$2")
 SMOKE_BINARY=$(cd "$(dirname "$3")" || exit; pwd -P)/$(basename "$3")
+# Resolve helper commands before enabling injection. macOS 26 system tools can
+# be arm64e, while Doorstop deliberately ships arm64 and x86_64 slices.
+UNITYPLAYER_DIR=$(dirname "${UNITYPLAYER_LIB}")
 SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/unity-doorstop-interpose.XXXXXX")
 
 cleanup() {
@@ -21,7 +24,7 @@ unset DOORSTOP_DISABLE DOORSTOP_INITIALIZED DOORSTOP_TARGET_ASSEMBLY
 
 DOORSTOP_ENABLED=0 \
 DYLD_INSERT_LIBRARIES="${LIBDOORSTOP}" \
-DYLD_LIBRARY_PATH="$(dirname "${UNITYPLAYER_LIB}"):${DYLD_LIBRARY_PATH-}" \
+DYLD_LIBRARY_PATH="${UNITYPLAYER_DIR}:${DYLD_LIBRARY_PATH-}" \
     "${SMOKE_BINARY}" disabled
 
 printf '%s\n' override > "${SMOKE_TMP}/override.config"
@@ -32,7 +35,7 @@ enabled_output=$(
     EXPECTED_BOOT_CONFIG_PATH="$(pwd -P)/macos-dlsym-smoke_Data/boot.config" \
     REDIRECT_OUTPUT_PATH="${SMOKE_TMP}/redirected-output" \
     DYLD_INSERT_LIBRARIES="${LIBDOORSTOP}" \
-    DYLD_LIBRARY_PATH="$(dirname "${UNITYPLAYER_LIB}"):${DYLD_LIBRARY_PATH-}" \
+    DYLD_LIBRARY_PATH="${UNITYPLAYER_DIR}:${DYLD_LIBRARY_PATH-}" \
         "${SMOKE_BINARY}" enabled
 )
 [ "${enabled_output}" = "unity-interpose-ok" ] || {
